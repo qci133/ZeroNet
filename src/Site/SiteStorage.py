@@ -12,14 +12,16 @@ from Db import Db
 from Debug import Debug
 from Config import config
 from util import helper
+from Plugin import PluginManager
+from Translate import translate as _
 
 
-class SiteStorage:
-
+@PluginManager.acceptPlugins
+class SiteStorage(object):
     def __init__(self, site, allow_create=True):
         self.site = site
-        self.directory = "%s/%s" % (config.data_dir, self.site.address)  # Site data diretory
-        self.allowed_dir = os.path.abspath(self.directory.decode(sys.getfilesystemencoding()))  # Only serve/modify file within this dir
+        self.directory = u"%s/%s" % (config.data_dir, self.site.address)  # Site data diretory
+        self.allowed_dir = os.path.abspath(self.directory)  # Only serve file within this dir
         self.log = site.log
         self.db = None  # Db class
         self.db_checked = False  # Checked db tables since startup
@@ -68,6 +70,30 @@ class SiteStorage:
                 self.openDb()
         return self.db
 
+    def updateDbFile(self, inner_path, file=None, cur=None):
+        path = self.getPath(inner_path)
+        return self.getDb().updateJson(path, file, cur)
+
+    # Return possible db files for the site
+    def getDbFiles(self):
+        for content_inner_path, content in self.site.content_manager.contents.iteritems():
+            # content.json file itself
+            if self.isFile(content_inner_path):
+                yield content_inner_path, self.getPath(content_inner_path)
+            else:
+                self.log.error("[MISSING] %s" % content_inner_path)
+            # Data files in content.json
+            content_inner_path_dir = helper.getDirname(content_inner_path)  # Content.json dir relative to site
+            for file_relative_path in content.get("files", {}).keys() + content.get("files_optional", {}).keys():
+                if not file_relative_path.endswith(".json"):
+                    continue  # We only interesed in json files
+                file_inner_path = content_inner_path_dir + file_relative_path  # File Relative to site dir
+                file_inner_path = file_inner_path.strip("/")  # Strip leading /
+                if self.isFile(file_inner_path):
+                    yield file_inner_path, self.getPath(file_inner_path)
+                else:
+                    self.log.error("[MISSING] %s" % file_inner_path)
+
     # Rebuild sql cache
     def rebuildDb(self, delete_db=True):
         self.has_db = self.isFile("dbschema.json")
@@ -79,11 +105,13 @@ class SiteStorage:
         if os.path.isfile(db_path) and delete_db:
             if self.db:
                 self.db.close()  # Close db if open
+                time.sleep(0.5)
             self.log.info("Deleting %s" % db_path)
             try:
                 os.unlink(db_path)
             except Exception, err:
                 self.log.error("Delete error: %s" % err)
+        self.db = None
         self.openDb(check=False)
         self.log.info("Creating tables...")
         self.db.checkTables()
@@ -93,29 +121,30 @@ class SiteStorage:
         cur.logging = False
         found = 0
         s = time.time()
-        for content_inner_path, content in self.site.content_manager.contents.iteritems():
-            content_path = self.getPath(content_inner_path)
-            if os.path.isfile(content_path):  # Missing content.json file
-                if self.db.loadJson(content_path, cur=cur):
-                    found += 1
-            else:
-                self.log.error("[MISSING] %s" % content_inner_path)
-            for file_relative_path in content["files"].keys():
-                if not file_relative_path.endswith(".json"):
-                    continue  # We only interesed in json files
-                content_inner_path_dir = helper.getDirname(content_inner_path)  # Content.json dir relative to site
-                file_inner_path = content_inner_path_dir + file_relative_path  # File Relative to site dir
-                file_inner_path = file_inner_path.strip("/")  # Strip leading /
-                file_path = self.getPath(file_inner_path)
-                if os.path.isfile(file_path):
-                    if self.db.loadJson(file_path, cur=cur):
+        db_files = list(self.getDbFiles())
+        try:
+            if len(db_files) > 100:
+                self.site.messageWebsocket(_["Database rebuilding...<br>Imported {0} of {1} files..."].format("0000", len(db_files)), "rebuild", 0)
+            for file_inner_path, file_path in db_files:
+                try:
+                    if self.updateDbFile(file_inner_path, file=open(file_path, "rb"), cur=cur):
                         found += 1
-                else:
-                    self.log.error("[MISSING] %s" % file_inner_path)
-        cur.execute("END")
-        self.log.info("Imported %s data file in %ss" % (found, time.time() - s))
-        self.event_db_busy.set(True)  # Event done, notify waiters
-        self.event_db_busy = None  # Clear event
+                except Exception, err:
+                    self.log.error("Error importing %s: %s" % (file_inner_path, Debug.formatException(err)))
+                if found and found % 100 == 0:
+                    self.site.messageWebsocket(
+                        _["Database rebuilding...<br>Imported {0} of {1} files..."].format(found, len(db_files)),
+                        "rebuild",
+                        int(float(found) / len(db_files) * 100)
+                    )
+
+        finally:
+            cur.execute("END")
+            if len(db_files) > 100:
+                self.site.messageWebsocket(_["Database rebuilding...<br>Imported {0} of {1} files..."].format(found, len(db_files)), "rebuild", 100)
+            self.log.info("Imported %s data file in %ss" % (found, time.time() - s))
+            self.event_db_busy.set(True)  # Event done, notify waiters
+            self.event_db_busy = None  # Clear event
 
     # Execute sql query or rebuild on dberror
     def query(self, query, params=None):
@@ -153,8 +182,11 @@ class SiteStorage:
             with open(file_path, "wb") as file:
                 shutil.copyfileobj(content, file)  # Write buff to disk
         else:  # Simple string
-            with open(file_path, "wb") as file:
-                file.write(content)
+            if inner_path == "content.json" and os.path.isfile(file_path):
+                helper.atomicWrite(file_path, content)
+            else:
+                with open(file_path, "wb") as file:
+                    file.write(content)
         del content
         self.onUpdated(inner_path)
 
@@ -162,6 +194,7 @@ class SiteStorage:
     def delete(self, inner_path):
         file_path = self.getPath(inner_path)
         os.unlink(file_path)
+        self.onUpdated(inner_path, file=False)
 
     def deleteDir(self, inner_path):
         dir_path = self.getPath(inner_path)
@@ -181,7 +214,7 @@ class SiteStorage:
             raise err
 
     # List files from a directory
-    def list(self, dir_inner_path):
+    def walk(self, dir_inner_path):
         directory = self.getPath(dir_inner_path)
         for root, dirs, files in os.walk(directory):
             root = root.replace("\\", "/")
@@ -192,20 +225,25 @@ class SiteStorage:
                 else:
                     yield file_name
 
+    # list directories in a directory
+    def list(self, dir_inner_path):
+        directory = self.getPath(dir_inner_path)
+        return os.listdir(directory)
+
     # Site content updated
-    def onUpdated(self, inner_path):
-        file_path = self.getPath(inner_path)
+    def onUpdated(self, inner_path, file=None):
         # Update Sql cache
         if inner_path == "dbschema.json":
             self.has_db = self.isFile("dbschema.json")
             # Reopen DB to check changes
-            self.closeDb()
-            self.openDb()
+            if self.has_db:
+                self.closeDb()
+                self.openDb()
         elif not config.disable_db and inner_path.endswith(".json") and self.has_db:  # Load json file to db
             if config.verbose:
-                self.log.debug("Loading json file to db: %s" % inner_path)
+                self.log.debug("Loading json file to db: %s (file: %s)" % (inner_path, file))
             try:
-                self.getDb().loadJson(file_path)
+                self.updateDbFile(inner_path, file)
             except Exception, err:
                 self.log.error("Json %s load error: %s" % (inner_path, Debug.formatException(err)))
                 self.closeDb()
@@ -218,16 +256,24 @@ class SiteStorage:
     # Write formatted json file
     def writeJson(self, inner_path, data):
         content = json.dumps(data, indent=1, sort_keys=True)
+
         # Make it a little more compact by removing unnecessary white space
+        def compact_dict(match):
+            if "\n" in match.group(0):
+                return match.group(0).replace(match.group(1), match.group(1).strip())
+            else:
+                return match.group(0)
+
+        content = re.sub("\{(\n[^,\[\{]{10,100}?)\}[, ]{0,2}\n", compact_dict, content, flags=re.DOTALL)
 
         def compact_list(match):
-            return "[ " + match.group(1).strip() + " ]"
+            if "\n" in match.group(0):
+                stripped_lines = re.sub("\n[ ]*", "", match.group(1))
+                return match.group(0).replace(match.group(1), stripped_lines)
+            else:
+                return match.group(0)
 
-        def compact_dict(match):
-            return "{ " + match.group(1).strip() + " }"
-
-        content = re.sub("\[([^,\{\[]{10,100}?)\]", compact_list, content, flags=re.DOTALL)
-        content = re.sub("\{([^,\[\{]{10,100}?)\}", compact_dict, content, flags=re.DOTALL)
+        content = re.sub("\[([^\[\{]{2,300}?)\][, ]{0,2}\n", compact_list, content, flags=re.DOTALL)
 
         # Remove end of line whitespace
         content = re.sub("(?m)[ ]+$", "", content)
@@ -261,11 +307,10 @@ class SiteStorage:
         if not inner_path:
             return self.directory
 
-        file_path = u"%s/%s" % (self.directory, inner_path)
+        if ".." in inner_path:
+            raise Exception(u"File not allowed: %s" % inner_path)
 
-        if ".." in file_path:
-            raise Exception(u"File not allowed: %s" % file_path)
-        return file_path
+        return u"%s/%s" % (self.directory, inner_path)
 
     # Get site dir relative path
     def getInnerPath(self, path):
@@ -281,6 +326,7 @@ class SiteStorage:
         i = 0
 
         if not self.site.content_manager.contents.get("content.json"):  # No content.json, download it first
+            self.log.debug("VerifyFile content.json not exists")
             self.site.needFile("content.json", update=True)  # Force update to fix corrupt file
             self.site.content_manager.loadContent()  # Reload content.json
         for content_inner_path, content in self.site.content_manager.contents.items():
@@ -307,18 +353,20 @@ class SiteStorage:
 
                 if not ok:
                     self.log.debug("[CHANGED] %s" % file_inner_path)
-                    if add_changed or content.get("cert_sign"):  # If updating own site only add changed user files
+                    if add_changed or content.get("cert_user_id"):  # If updating own site only add changed user files
                         bad_files.append(file_inner_path)
 
             # Optional files
             optional_added = 0
             optional_removed = 0
             for file_relative_path in content.get("files_optional", {}).keys():
+                file_node = content["files_optional"][file_relative_path]
                 file_inner_path = helper.getDirname(content_inner_path) + file_relative_path  # Relative to site dir
                 file_inner_path = file_inner_path.strip("/")  # Strip leading /
                 file_path = self.getPath(file_inner_path)
                 if not os.path.isfile(file_path):
-                    self.site.content_manager.hashfield.removeHash(content["files_optional"][file_relative_path]["sha512"])
+                    if self.site.content_manager.hashfield.hasHash(file_node["sha512"]):
+                        self.site.content_manager.optionalRemove(file_inner_path, file_node["sha512"], file_node["size"])
                     if add_optional:
                         bad_files.append(file_inner_path)
                     continue
@@ -329,30 +377,31 @@ class SiteStorage:
                     ok = self.site.content_manager.verifyFile(file_inner_path, open(file_path, "rb"))
 
                 if ok:
-                    self.site.content_manager.hashfield.appendHash(content["files_optional"][file_relative_path]["sha512"])
-                    optional_added += 1
+                    if not self.site.content_manager.hashfield.hasHash(file_node["sha512"]):
+                        self.site.content_manager.optionalDownloaded(file_inner_path, file_node["sha512"], file_node["size"])
+                        optional_added += 1
                 else:
-                    self.site.content_manager.hashfield.removeHash(content["files_optional"][file_relative_path]["sha512"])
-                    optional_removed += 1
-                    if add_optional:
-                        bad_files.append(file_inner_path)
+                    if self.site.content_manager.hashfield.hasHash(file_node["sha512"]):
+                        self.site.content_manager.optionalRemove(file_inner_path, file_node["sha512"], file_node["size"])
+                        optional_removed += 1
+                    bad_files.append(file_inner_path)
                     self.log.debug("[OPTIONAL CHANGED] %s" % file_inner_path)
 
             if config.verbose:
                 self.log.debug(
-                    "%s verified: %s, quick: %s, bad: %s, optionals: +%s -%s" %
-                    (content_inner_path, len(content["files"]), quick_check, bad_files, optional_added, optional_removed)
+                    "%s verified: %s, quick: %s, optionals: +%s -%s" %
+                    (content_inner_path, len(content["files"]), quick_check, optional_added, optional_removed)
                 )
 
         time.sleep(0.0001)  # Context switch to avoid gevent hangs
         return bad_files
 
     # Check and try to fix site files integrity
-    def checkFiles(self, quick_check=True):
+    def updateBadFiles(self, quick_check=True):
         s = time.time()
         bad_files = self.verifyFiles(
             quick_check,
-            add_optional=self.site.settings.get("autodownloadoptional"),
+            add_optional=self.site.isDownloadable(""),
             add_changed=not self.site.settings.get("own")  # Don't overwrite changed files if site owned
         )
         self.site.bad_files = {}
@@ -363,20 +412,10 @@ class SiteStorage:
 
     # Delete site's all file
     def deleteFiles(self):
-        if self.has_db:
-            self.log.debug("Deleting db file...")
-            self.closeDb()
-            try:
-                schema = self.loadJson("dbschema.json")
-                db_path = self.getPath(schema["db_file"])
-                if os.path.isfile(db_path):
-                    os.unlink(db_path)
-            except Exception, err:
-                self.log.error("Db file delete error: %s" % err)
-
         self.log.debug("Deleting files from content.json...")
         files = []  # Get filenames
-        for content_inner_path, content in self.site.content_manager.contents.iteritems():
+        for content_inner_path in self.site.content_manager.contents.keys():
+            content = self.site.content_manager.contents[content_inner_path]
             files.append(content_inner_path)
             # Add normal files
             for file_relative_path in content.get("files", {}).keys():
@@ -387,10 +426,29 @@ class SiteStorage:
                 file_inner_path = helper.getDirname(content_inner_path) + file_relative_path  # Relative to site dir
                 files.append(file_inner_path)
 
+        if self.isFile("dbschema.json"):
+            self.log.debug("Deleting db file...")
+            self.closeDb()
+            self.has_db = False
+            try:
+                schema = self.loadJson("dbschema.json")
+                db_path = self.getPath(schema["db_file"])
+                if os.path.isfile(db_path):
+                    os.unlink(db_path)
+            except Exception, err:
+                self.log.error("Db file delete error: %s" % err)
+
         for inner_path in files:
             path = self.getPath(inner_path)
             if os.path.isfile(path):
-                os.unlink(path)
+                for retry in range(5):
+                    try:
+                        os.unlink(path)
+                        break
+                    except Exception, err:
+                        self.log.error("Error removing %s: %s, try #%s" % (path, err, retry))
+                    time.sleep(float(retry) / 10)
+            self.onUpdated(inner_path, False)
 
         self.log.debug("Deleting empty dirs...")
         for root, dirs, files in os.walk(self.directory, topdown=False):

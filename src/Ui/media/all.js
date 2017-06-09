@@ -10,6 +10,35 @@
 
 
 
+/* ---- src/Ui/media/lib/RateLimit.coffee ---- */
+
+
+(function() {
+  var call_after_interval, limits;
+
+  limits = {};
+
+  call_after_interval = {};
+
+  window.RateLimit = function(interval, fn) {
+    if (!limits[fn]) {
+      call_after_interval[fn] = false;
+      fn();
+      return limits[fn] = setTimeout((function() {
+        if (call_after_interval[fn]) {
+          fn();
+        }
+        delete limits[fn];
+        return delete call_after_interval[fn];
+      }), interval);
+    } else {
+      return call_after_interval[fn] = true;
+    }
+  };
+
+}).call(this);
+
+
 /* ---- src/Ui/media/lib/ZeroWebsocket.coffee ---- */
 
 
@@ -41,7 +70,9 @@
       this.ws.onmessage = this.onMessage;
       this.ws.onopen = this.onOpenWebsocket;
       this.ws.onerror = this.onErrorWebsocket;
-      return this.ws.onclose = this.onCloseWebsocket;
+      this.ws.onclose = this.onCloseWebsocket;
+      this.connected = false;
+      return this.message_queue = [];
     };
 
     ZeroWebsocket.prototype.onMessage = function(e) {
@@ -94,7 +125,12 @@
         message.id = this.next_message_id;
         this.next_message_id += 1;
       }
-      this.ws.send(JSON.stringify(message));
+      if (this.connected) {
+        this.ws.send(JSON.stringify(message));
+      } else {
+        this.log("Not connected, adding message to queue");
+        this.message_queue.push(message);
+      }
       if (cb) {
         return this.waiting_cb[message.id] = cb;
       }
@@ -107,7 +143,15 @@
     };
 
     ZeroWebsocket.prototype.onOpenWebsocket = function(e) {
+      var message, _i, _len, _ref;
       this.log("Open");
+      this.connected = true;
+      _ref = this.message_queue;
+      for (_i = 0, _len = _ref.length; _i < _len; _i++) {
+        message = _ref[_i];
+        this.ws.send(JSON.stringify(message));
+      }
+      this.message_queue = [];
       if (this.onOpen != null) {
         return this.onOpen(e);
       }
@@ -125,6 +169,7 @@
         reconnect = 10000;
       }
       this.log("Closed", e);
+      this.connected = false;
       if (e && e.code === 1000 && e.wasClean === false) {
         this.log("Server error, please reload the page", e.wasClean);
       } else {
@@ -532,15 +577,25 @@ jQuery.extend( jQuery.easing,
       if (window.show_loadingscreen) {
         this.showScreen();
       }
+      this.timer_hide = null;
     }
 
     Loading.prototype.setProgress = function(percent) {
-      return $(".progressbar").css("width", percent * 100 + "%").css("opacity", "1").css("display", "block");
+      if (this.timer_hide) {
+        clearInterval(this.timer_hide);
+      }
+      return RateLimit(200, function() {
+        return $(".progressbar").css("width", percent * 100 + "%").css("opacity", "1").css("display", "block");
+      });
     };
 
     Loading.prototype.hideProgress = function() {
       console.log("hideProgress");
-      return $(".progressbar").css("width", "100%").css("opacity", "0").hideLater(1000);
+      return this.timer_hide = setTimeout(((function(_this) {
+        return function() {
+          return $(".progressbar").css("width", "100%").css("opacity", "0").hideLater(1000);
+        };
+      })(this)), 300);
     };
 
     Loading.prototype.showScreen = function() {
@@ -553,7 +608,7 @@ jQuery.extend( jQuery.easing,
       var button, line;
       if ($(".console .button-setlimit").length === 0) {
         line = this.printLine("Site size: <b>" + (parseInt(site_info.settings.size / 1024 / 1024)) + "MB</b> is larger than default allowed " + (parseInt(site_info.size_limit)) + "MB", "warning");
-        button = $("<a href='#Set+limit' class='button button-setlimit'>Open site and set size limit to " + site_info.next_size_limit + "MB</a>");
+        button = $("<a href='#Set+limit' class='button button-setlimit'>" + ("Open site and set size limit to " + site_info.next_size_limit + "MB") + "</a>");
         button.on("click", (function() {
           return window.wrapper.setSizeLimit(site_info.next_size_limit);
         }));
@@ -664,9 +719,14 @@ jQuery.extend( jQuery.easing,
       }
       elem = $(".notification.template", this.elem).clone().removeClass("template");
       elem.addClass("notification-" + type).addClass("notification-" + id);
+      if (type === "progress") {
+        elem.addClass("notification-done");
+      }
       if (type === "error") {
         $(".notification-icon", elem).html("!");
       } else if (type === "done") {
+        $(".notification-icon", elem).html("<div class='icon-success'></div>");
+      } else if (type === "progress") {
         $(".notification-icon", elem).html("<div class='icon-success'></div>");
       } else if (type === "ask") {
         $(".notification-icon", elem).html("?");
@@ -711,11 +771,12 @@ jQuery.extend( jQuery.easing,
           return false;
         };
       })(this));
-      return $(".select", elem).on("click", (function(_this) {
+      $(".select", elem).on("click", (function(_this) {
         return function() {
           return _this.close(elem);
         };
       })(this));
+      return elem;
     };
 
     Notifications.prototype.close = function(elem) {
@@ -748,19 +809,19 @@ jQuery.extend( jQuery.easing,
 
 (function() {
   var Wrapper, origin, proto, ws_url,
-    __bind = function(fn, me){ return function(){ return fn.apply(me, arguments); }; },
-    __indexOf = [].indexOf || function(item) { for (var i = 0, l = this.length; i < l; i++) { if (i in this && this[i] === item) return i; } return -1; },
-    __slice = [].slice;
+    bind = function(fn, me){ return function(){ return fn.apply(me, arguments); }; },
+    indexOf = [].indexOf || function(item) { for (var i = 0, l = this.length; i < l; i++) { if (i in this && this[i] === item) return i; } return -1; },
+    slice = [].slice;
 
   Wrapper = (function() {
     function Wrapper(ws_url) {
-      this.gotoSite = __bind(this.gotoSite, this);
-      this.setSizeLimit = __bind(this.setSizeLimit, this);
-      this.onLoad = __bind(this.onLoad, this);
-      this.onCloseWebsocket = __bind(this.onCloseWebsocket, this);
-      this.onOpenWebsocket = __bind(this.onOpenWebsocket, this);
-      this.onMessageInner = __bind(this.onMessageInner, this);
-      this.onMessageWebsocket = __bind(this.onMessageWebsocket, this);
+      this.gotoSite = bind(this.gotoSite, this);
+      this.setSizeLimit = bind(this.setSizeLimit, this);
+      this.onLoad = bind(this.onLoad, this);
+      this.onCloseWebsocket = bind(this.onCloseWebsocket, this);
+      this.onOpenWebsocket = bind(this.onOpenWebsocket, this);
+      this.onMessageInner = bind(this.onMessageInner, this);
+      this.onMessageWebsocket = bind(this.onMessageWebsocket, this);
       this.log("Created!");
       this.loading = new Loading();
       this.notifications = new Notifications($(".notifications"));
@@ -796,8 +857,8 @@ jQuery.extend( jQuery.easing,
       window.onpopstate = (function(_this) {
         return function(e) {
           return _this.sendInner({
-            "cmd": "wrapperPopstate",
-            "result": {
+            "cmd": "wrapperPopState",
+            "params": {
               "href": document.location.href,
               "state": e.state
             }
@@ -808,7 +869,7 @@ jQuery.extend( jQuery.easing,
     }
 
     Wrapper.prototype.onMessageWebsocket = function(e) {
-      var cmd, id, message, type, _ref;
+      var cmd, id, message, ref, type;
       message = JSON.parse(e.data);
       cmd = message.cmd;
       if (cmd === "response") {
@@ -820,12 +881,14 @@ jQuery.extend( jQuery.easing,
       } else if (cmd === "notification") {
         type = message.params[0];
         id = "notification-" + message.id;
-        if (__indexOf.call(message.params[0], "-") >= 0) {
-          _ref = message.params[0].split("-"), id = _ref[0], type = _ref[1];
+        if (indexOf.call(message.params[0], "-") >= 0) {
+          ref = message.params[0].split("-"), id = ref[0], type = ref[1];
         }
         return this.notifications.add(id, type, message.params[1], message.params[2]);
+      } else if (cmd === "progress") {
+        return this.actionProgress(message);
       } else if (cmd === "prompt") {
-        return this.displayPrompt(message.params[0], message.params[1], message.params[2], (function(_this) {
+        return this.displayPrompt(message.params[0], message.params[1], message.params[2], message.params[3], (function(_this) {
           return function(res) {
             return _this.ws.response(message.id, res);
           };
@@ -839,8 +902,9 @@ jQuery.extend( jQuery.easing,
       } else if (cmd === "setSiteInfo") {
         this.sendInner(message);
         if (message.params.address === this.address) {
-          return this.setSiteInfo(message.params);
+          this.setSiteInfo(message.params);
         }
+        return this.updateProgress(message.params);
       } else if (cmd === "error") {
         return this.notifications.add("notification-" + message.id, "error", message.params, 0);
       } else if (cmd === "updating") {
@@ -868,10 +932,6 @@ jQuery.extend( jQuery.easing,
       }
       if (window.postmessage_nonce_security && message.wrapper_nonce !== window.wrapper_nonce) {
         this.log("Message nonce error:", message.wrapper_nonce, '!=', window.wrapper_nonce);
-        this.actionNotification({
-          "params": ["error", "Message wrapper_nonce error, please report!"]
-        });
-        window.removeEventListener("message", this.onMessageInner);
         return;
       }
       cmd = message.cmd;
@@ -883,7 +943,7 @@ jQuery.extend( jQuery.easing,
           });
           return this.wrapperWsInited = true;
         }
-      } else if (cmd === "innerLoaded") {
+      } else if (cmd === "innerLoaded" || cmd === "wrapperInnerLoaded") {
         if (window.location.hash) {
           $("#inner-iframe")[0].src += window.location.hash;
           return this.log("Added hash to location", $("#inner-iframe")[0].src);
@@ -894,8 +954,12 @@ jQuery.extend( jQuery.easing,
         return this.actionConfirm(message);
       } else if (cmd === "wrapperPrompt") {
         return this.actionPrompt(message);
+      } else if (cmd === "wrapperProgress") {
+        return this.actionProgress(message);
       } else if (cmd === "wrapperSetViewport") {
         return this.actionSetViewport(message);
+      } else if (cmd === "wrapperSetTitle") {
+        return $("head title").text(message.params);
       } else if (cmd === "wrapperReload") {
         return this.actionReload(message);
       } else if (cmd === "wrapperGetLocalStorage") {
@@ -916,6 +980,10 @@ jQuery.extend( jQuery.easing,
         });
       } else if (cmd === "wrapperOpenWindow") {
         return this.actionOpenWindow(message.params);
+      } else if (cmd === "wrapperPermissionAdd") {
+        return this.actionPermissionAdd(message);
+      } else if (cmd === "wrapperRequestFullscreen") {
+        return this.actionRequestFullscreen();
       } else {
         if (message.id < 1000000) {
           return this.ws.send(message);
@@ -934,10 +1002,12 @@ jQuery.extend( jQuery.easing,
         query = window.location.search;
       }
       back = window.location.pathname;
-      if (back.slice(-1) !== "/") {
+      if (back.match(/^\/[^\/]+$/)) {
         back += "/";
       }
-      if (query.replace("?", "")) {
+      if (query.startsWith("#")) {
+        back = query;
+      } else if (query.replace("?", "")) {
         back += "?" + query.replace("?", "");
       }
       return back;
@@ -967,6 +1037,48 @@ jQuery.extend( jQuery.easing,
       }
     };
 
+    Wrapper.prototype.actionRequestFullscreen = function() {
+      var elem, request_fullscreen;
+      if (indexOf.call(this.site_info.settings.permissions, "Fullscreen") >= 0) {
+        elem = document.getElementById("inner-iframe");
+        request_fullscreen = elem.requestFullScreen || elem.webkitRequestFullscreen || elem.mozRequestFullScreen || elem.msRequestFullScreen;
+        request_fullscreen.call(elem);
+        return setTimeout(((function(_this) {
+          return function() {
+            if (window.innerHeight !== screen.height) {
+              return _this.displayConfirm("This site requests permission:" + " <b>Fullscreen</b>", "Grant", function() {
+                return request_fullscreen.call(elem);
+              });
+            }
+          };
+        })(this)), 100);
+      } else {
+        return this.displayConfirm("This site requests permission:" + " <b>Fullscreen</b>", "Grant", (function(_this) {
+          return function() {
+            _this.site_info.settings.permissions.push("Fullscreen");
+            _this.actionRequestFullscreen();
+            return _this.ws.cmd("permissionAdd", "Fullscreen");
+          };
+        })(this));
+      }
+    };
+
+    Wrapper.prototype.actionPermissionAdd = function(message) {
+      var permission;
+      permission = message.params;
+      return this.displayConfirm("This site requests permission:" + (" <b>" + (this.toHtmlSafe(permission)) + "</b>"), "Grant", (function(_this) {
+        return function() {
+          return _this.ws.cmd("permissionAdd", permission, function() {
+            return _this.sendInner({
+              "cmd": "response",
+              "to": message.id,
+              "result": "Granted"
+            });
+          });
+        };
+      })(this));
+    };
+
     Wrapper.prototype.actionNotification = function(message) {
       var body;
       message.params = this.toHtmlSafe(message.params);
@@ -974,19 +1086,27 @@ jQuery.extend( jQuery.easing,
       return this.notifications.add("notification-" + message.id, message.params[0], body, message.params[2]);
     };
 
-    Wrapper.prototype.displayConfirm = function(message, caption, cb) {
-      var body, button;
-      body = $("<span class='message'>" + message + "</span>");
-      button = $("<a href='#" + caption + "' class='button button-" + caption + "'>" + caption + "</a>");
-      button.on("click", (function(_this) {
-        return function() {
-          cb(true);
-          return false;
-        };
-      })(this));
-      body.append(button);
+    Wrapper.prototype.displayConfirm = function(message, captions, cb) {
+      var body, button, buttons, caption, i, j, len;
+      body = $("<span class='message-outer'><span class='message'>" + message + "</span></span>");
+      buttons = $("<span class='buttons'></span>");
+      if (!(captions instanceof Array)) {
+        captions = [captions];
+      }
+      for (i = j = 0, len = captions.length; j < len; i = ++j) {
+        caption = captions[i];
+        button = $("<a href='#" + caption + "' class='button button-confirm button-" + caption + " button-" + (i + 1) + "' data-value='" + (i + 1) + "'>" + caption + "</a>");
+        button.on("click", (function(_this) {
+          return function(e) {
+            cb(parseInt(e.currentTarget.dataset.value));
+            return false;
+          };
+        })(this));
+        buttons.append(button);
+      }
+      body.append(buttons);
       this.notifications.add("notification-" + caption, "ask", body);
-      button.focus();
+      buttons.first().focus();
       return $(".notification").scrollLeft(0);
     };
 
@@ -1002,21 +1122,21 @@ jQuery.extend( jQuery.easing,
         caption = "ok";
       }
       return this.displayConfirm(message.params[0], caption, (function(_this) {
-        return function() {
+        return function(res) {
           _this.sendInner({
             "cmd": "response",
             "to": message.id,
-            "result": "boom"
+            "result": res
           });
           return false;
         };
       })(this));
     };
 
-    Wrapper.prototype.displayPrompt = function(message, type, caption, cb) {
+    Wrapper.prototype.displayPrompt = function(message, type, caption, placeholder, cb) {
       var body, button, input;
       body = $("<span class='message'>" + message + "</span>");
-      input = $("<input type='" + type + "' class='input button-" + type + "'/>");
+      input = $("<input type='" + type + "' class='input button-" + type + "' placeholder='" + placeholder + "'/>");
       input.on("keyup", (function(_this) {
         return function(e) {
           if (e.keyCode === 13) {
@@ -1039,15 +1159,20 @@ jQuery.extend( jQuery.easing,
     };
 
     Wrapper.prototype.actionPrompt = function(message) {
-      var caption, type;
+      var caption, placeholder, type;
       message.params = this.toHtmlSafe(message.params);
       if (message.params[1]) {
         type = message.params[1];
       } else {
         type = "text";
       }
-      caption = "OK";
-      return this.displayPrompt(message.params[0], type, caption, (function(_this) {
+      caption = message.params[2] ? message.params[2] : "OK";
+      if (message.params[3] != null) {
+        placeholder = message.params[3];
+      } else {
+        placeholder = "";
+      }
+      return this.displayPrompt(message.params[0], type, caption, placeholder, (function(_this) {
         return function(res) {
           return _this.sendInner({
             "cmd": "response",
@@ -1058,6 +1183,65 @@ jQuery.extend( jQuery.easing,
       })(this));
     };
 
+    Wrapper.prototype.actionProgress = function(message) {
+      var body, circle, elem, offset, percent, width;
+      message.params = this.toHtmlSafe(message.params);
+      percent = Math.min(100, message.params[2]) / 100;
+      offset = 75 - (percent * 75);
+      circle = "<div class=\"circle\"><svg class=\"circle-svg\" width=\"30\" height=\"30\" viewport=\"0 0 30 30\" version=\"1.1\" xmlns=\"http://www.w3.org/2000/svg\">\n  				<circle r=\"12\" cx=\"15\" cy=\"15\" fill=\"transparent\" class=\"circle-bg\"></circle>\n  				<circle r=\"12\" cx=\"15\" cy=\"15\" fill=\"transparent\" class=\"circle-fg\" style=\"stroke-dashoffset: " + offset + "\"></circle>\n</svg></div>";
+      body = "<span class='message'>" + message.params[1] + "</span>" + circle;
+      elem = $(".notification-" + message.params[0]);
+      if (elem.length) {
+        width = $(".body .message", elem).outerWidth();
+        $(".body .message", elem).html(message.params[1]);
+        if ($(".body .message", elem).css("width") === "") {
+          $(".body .message", elem).css("width", width);
+        }
+        $(".body .circle-fg", elem).css("stroke-dashoffset", offset);
+      } else {
+        elem = this.notifications.add(message.params[0], "progress", $(body));
+      }
+      if (percent > 0) {
+        $(".body .circle-bg", elem).css({
+          "animation-play-state": "paused",
+          "stroke-dasharray": "180px"
+        });
+      }
+      if ($(".notification-icon", elem).data("done")) {
+        return false;
+      } else if (message.params[2] >= 100) {
+        $(".circle-fg", elem).css("transition", "all 0.3s ease-in-out");
+        setTimeout((function() {
+          $(".notification-icon", elem).css({
+            transform: "scale(1)",
+            opacity: 1
+          });
+          return $(".notification-icon .icon-success", elem).css({
+            transform: "rotate(45deg) scale(1)"
+          });
+        }), 300);
+        setTimeout(((function(_this) {
+          return function() {
+            return _this.notifications.close(elem);
+          };
+        })(this)), 3000);
+        return $(".notification-icon", elem).data("done", true);
+      } else if (message.params[2] < 0) {
+        $(".body .circle-fg", elem).css("stroke", "#ec6f47").css("transition", "transition: all 0.3s ease-in-out");
+        setTimeout(((function(_this) {
+          return function() {
+            $(".notification-icon", elem).css({
+              transform: "scale(1)",
+              opacity: 1
+            });
+            elem.removeClass("notification-done").addClass("notification-error");
+            return $(".notification-icon .icon-success", elem).removeClass("icon-success").html("!");
+          };
+        })(this)), 300);
+        return $(".notification-icon", elem).data("done", true);
+      }
+    };
+
     Wrapper.prototype.actionSetViewport = function(message) {
       this.log("actionSetViewport", message);
       if ($("#viewport").length > 0) {
@@ -1065,6 +1249,10 @@ jQuery.extend( jQuery.easing,
       } else {
         return $('<meta name="viewport" id="viewport">').attr("content", this.toHtmlSafe(message.params)).appendTo("head");
       }
+    };
+
+    Wrapper.prototype.actionReload = function(message) {
+      return this.reload();
     };
 
     Wrapper.prototype.reload = function(url_post) {
@@ -1109,7 +1297,12 @@ jQuery.extend( jQuery.easing,
 
     Wrapper.prototype.actionSetLocalStorage = function(message) {
       var back;
-      return back = localStorage.setItem("site." + this.site_info.address + "." + this.site_info.auth_address, JSON.stringify(message.params));
+      back = localStorage.setItem("site." + this.site_info.address + "." + this.site_info.auth_address, JSON.stringify(message.params));
+      return this.sendInner({
+        "cmd": "response",
+        "to": message.id,
+        "result": back
+      });
     };
 
     Wrapper.prototype.onOpenWebsocket = function(e) {
@@ -1147,6 +1340,8 @@ jQuery.extend( jQuery.easing,
           });
           if (e && e.code === 1000 && e.wasClean === false) {
             return _this.ws_error = _this.notifications.add("connection", "error", "UiServer Websocket error, please reload the page.");
+          } else if (e && e.code === 1001 && e.wasClean === true) {
+
           } else if (!_this.ws_error) {
             return _this.ws_error = _this.notifications.add("connection", "error", "Connection with <b>UiServer Websocket</b> was lost. Reconnecting...");
           }
@@ -1155,7 +1350,7 @@ jQuery.extend( jQuery.easing,
     };
 
     Wrapper.prototype.onLoad = function(e) {
-      var _ref;
+      var ref;
       this.inner_loaded = true;
       if (!this.inner_ready) {
         this.sendInner({
@@ -1164,7 +1359,7 @@ jQuery.extend( jQuery.easing,
       }
       if (this.ws.ws.readyState === 1 && !this.site_info) {
         return this.reloadSiteInfo();
-      } else if (this.site_info && (((_ref = this.site_info.content) != null ? _ref.title : void 0) != null)) {
+      } else if (this.site_info && (((ref = this.site_info.content) != null ? ref.title : void 0) != null)) {
         window.document.title = this.site_info.content.title + " - ZeroNet";
         return this.log("Setting title to", window.document.title);
       }
@@ -1193,7 +1388,9 @@ jQuery.extend( jQuery.easing,
             } else {
               _this.displayConfirm("Site is larger than allowed: " + ((site_info.settings.size / 1024 / 1024).toFixed(1)) + "MB/" + site_info.size_limit + "MB", "Set limit to " + site_info.next_size_limit + "MB", function() {
                 return _this.ws.cmd("siteSetLimit", [site_info.next_size_limit], function(res) {
-                  return _this.notifications.add("size_limit", "done", res, 5000);
+                  if (res === "ok") {
+                    return _this.notifications.add("size_limit", "done", "Site storage limit modified!", 5000);
+                  }
                 });
               });
             }
@@ -1221,7 +1418,7 @@ jQuery.extend( jQuery.easing,
               window.document.title = site_info.content.title + " - ZeroNet";
               this.log("Required file done, setting title to", window.document.title);
             }
-            if (!$(".loadingscreen").length) {
+            if (!window.show_loadingscreen) {
               this.notifications.add("modified", "info", "New version of this page has just released.<br>Reload to see the modified content.");
             }
           }
@@ -1249,7 +1446,9 @@ jQuery.extend( jQuery.easing,
           this.displayConfirm("Running out of size limit (" + ((site_info.settings.size / 1024 / 1024).toFixed(1)) + "MB/" + site_info.size_limit + "MB)", "Set limit to " + site_info.next_size_limit + "MB", (function(_this) {
             return function() {
               _this.ws.cmd("siteSetLimit", [site_info.next_size_limit], function(res) {
-                return _this.notifications.add("size_limit", "done", res, 5000);
+                if (res === "ok") {
+                  return _this.notifications.add("size_limit", "done", "Site storage limit modified!", 5000);
+                }
               });
               return false;
             };
@@ -1259,24 +1458,31 @@ jQuery.extend( jQuery.easing,
       if (this.loading.screen_visible && this.inner_loaded && site_info.settings.size < site_info.size_limit * 1024 * 1024 && site_info.settings.size > 0) {
         this.loading.hideScreen();
       }
-      if (site_info.tasks > 0 && site_info.started_task_num > 0) {
-        this.loading.setProgress(1 - (site_info.tasks / site_info.started_task_num));
-      } else {
-        this.loading.hideProgress();
-      }
       this.site_info = site_info;
       return this.event_site_info.resolve();
     };
 
+    Wrapper.prototype.updateProgress = function(site_info) {
+      if (site_info.tasks > 0 && site_info.started_task_num > 0) {
+        return this.loading.setProgress(1 - (Math.max(site_info.tasks, site_info.bad_files) / site_info.started_task_num));
+      } else {
+        return this.loading.hideProgress();
+      }
+    };
+
     Wrapper.prototype.toHtmlSafe = function(values) {
-      var i, value, _i, _len;
+      var i, j, len, value;
       if (!(values instanceof Array)) {
         values = [values];
       }
-      for (i = _i = 0, _len = values.length; _i < _len; i = ++_i) {
+      for (i = j = 0, len = values.length; j < len; i = ++j) {
         value = values[i];
-        value = String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-        value = value.replace(/&lt;([\/]{0,1}(br|b|u|i))&gt;/g, "<$1>");
+        if (value instanceof Array) {
+          value = this.toHtmlSafe(value);
+        } else {
+          value = String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+          value = value.replace(/&lt;([\/]{0,1}(br|b|u|i))&gt;/g, "<$1>");
+        }
         values[i] = value;
       }
       return values;
@@ -1289,6 +1495,9 @@ jQuery.extend( jQuery.easing,
       this.ws.cmd("siteSetLimit", [size_limit], (function(_this) {
         return function(res) {
           var src;
+          if (res !== "ok") {
+            return false;
+          }
           _this.loading.printLine(res);
           _this.inner_loaded = false;
           if (reload) {
@@ -1315,8 +1524,8 @@ jQuery.extend( jQuery.easing,
 
     Wrapper.prototype.log = function() {
       var args;
-      args = 1 <= arguments.length ? __slice.call(arguments, 0) : [];
-      return console.log.apply(console, ["[Wrapper]"].concat(__slice.call(args)));
+      args = 1 <= arguments.length ? slice.call(arguments, 0) : [];
+      return console.log.apply(console, ["[Wrapper]"].concat(slice.call(args)));
     };
 
     return Wrapper;

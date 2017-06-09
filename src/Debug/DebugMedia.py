@@ -60,7 +60,7 @@ def merge(merged_path):
 
     changed = {}
     for file_path in findfiles(merge_dir, find_ext):
-        if os.path.getmtime(file_path) > merged_mtime:
+        if os.path.getmtime(file_path) > merged_mtime + 1:
             changed[file_path] = True
     if not changed:
         return  # Assets not changed, nothing to do
@@ -85,7 +85,7 @@ def merge(merged_path):
                     return False  # No coffeescript compiler, skip this file
 
                 # Replace / with os separators and escape it
-                file_path_escaped = helper.shellquote(os.path.join(*file_path.split("/")))
+                file_path_escaped = helper.shellquote(file_path.replace("/", os.path.sep))
 
                 if "%s" in config.coffeescript_compiler:  # Replace %s with coffeescript file
                     command = config.coffeescript_compiler % file_path_escaped

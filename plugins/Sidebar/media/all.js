@@ -187,20 +187,21 @@ window.initScrollable = function () {
 
 (function() {
   var Sidebar,
-    __bind = function(fn, me){ return function(){ return fn.apply(me, arguments); }; },
-    __extends = function(child, parent) { for (var key in parent) { if (__hasProp.call(parent, key)) child[key] = parent[key]; } function ctor() { this.constructor = child; } ctor.prototype = parent.prototype; child.prototype = new ctor(); child.__super__ = parent.prototype; return child; },
-    __hasProp = {}.hasOwnProperty;
+    bind = function(fn, me){ return function(){ return fn.apply(me, arguments); }; },
+    extend = function(child, parent) { for (var key in parent) { if (hasProp.call(parent, key)) child[key] = parent[key]; } function ctor() { this.constructor = child; } ctor.prototype = parent.prototype; child.prototype = new ctor(); child.__super__ = parent.prototype; return child; },
+    hasProp = {}.hasOwnProperty;
 
-  Sidebar = (function(_super) {
-    __extends(Sidebar, _super);
+  Sidebar = (function(superClass) {
+    extend(Sidebar, superClass);
 
     function Sidebar() {
-      this.unloadGlobe = __bind(this.unloadGlobe, this);
-      this.displayGlobe = __bind(this.displayGlobe, this);
-      this.loadGlobe = __bind(this.loadGlobe, this);
-      this.animDrag = __bind(this.animDrag, this);
-      this.waitMove = __bind(this.waitMove, this);
-      this.resized = __bind(this.resized, this);
+      this.unloadGlobe = bind(this.unloadGlobe, this);
+      this.displayGlobe = bind(this.displayGlobe, this);
+      this.loadGlobe = bind(this.loadGlobe, this);
+      this.animDrag = bind(this.animDrag, this);
+      this.setHtmlTag = bind(this.setHtmlTag, this);
+      this.waitMove = bind(this.waitMove, this);
+      this.resized = bind(this.resized, this);
       this.tag = null;
       this.container = null;
       this.opened = false;
@@ -214,6 +215,7 @@ window.initScrollable = function () {
       this.initFixbutton();
       this.dragStarted = 0;
       this.globe = null;
+      this.preload_html = null;
       this.original_set_site_info = wrapper.setSiteInfo;
       if (false) {
         this.startDrag();
@@ -224,19 +226,36 @@ window.initScrollable = function () {
     }
 
     Sidebar.prototype.initFixbutton = function() {
-      this.fixbutton.on("mousedown", (function(_this) {
+
+      /*
+      		@fixbutton.on "mousedown touchstart", (e) =>
+      			if not @opened
+      				@logStart("Preloading")
+      				wrapper.ws.cmd "sidebarGetHtmlTag", {}, (res) =>
+      					@logEnd("Preloading")
+      					@preload_html = res
+       */
+      this.fixbutton.on("mousedown touchstart", (function(_this) {
         return function(e) {
+          if (e.button > 0) {
+            return;
+          }
           e.preventDefault();
-          _this.fixbutton.off("click");
-          _this.fixbutton.off("mousemove");
+          _this.fixbutton.off("click touchend touchcancel");
+          _this.fixbutton.off("mousemove touchmove");
           _this.dragStarted = +(new Date);
-          return _this.fixbutton.one("mousemove", function(e) {
-            _this.fixbutton_addx = _this.fixbutton.offset().left - e.pageX;
+          return _this.fixbutton.one("mousemove touchmove", function(e) {
+            var mousex;
+            mousex = e.pageX;
+            if (!mousex) {
+              mousex = e.originalEvent.touches[0].pageX;
+            }
+            _this.fixbutton_addx = _this.fixbutton.offset().left - mousex;
             return _this.startDrag();
           });
         };
       })(this));
-      this.fixbutton.parent().on("click", (function(_this) {
+      this.fixbutton.parent().on("click touchend touchcancel", (function(_this) {
         return function(e) {
           return _this.stopDrag();
         };
@@ -276,9 +295,9 @@ window.initScrollable = function () {
           }
         };
       })(this));
-      this.fixbutton.parents().on("mousemove", this.animDrag);
-      this.fixbutton.parents().on("mousemove", this.waitMove);
-      return this.fixbutton.parents().on("mouseup", (function(_this) {
+      this.fixbutton.parents().on("mousemove touchmove", this.animDrag);
+      this.fixbutton.parents().on("mousemove touchmove", this.waitMove);
+      return this.fixbutton.parents().on("mouseup touchend touchend touchcancel", (function(_this) {
         return function(e) {
           e.preventDefault();
           return _this.stopDrag();
@@ -289,7 +308,7 @@ window.initScrollable = function () {
     Sidebar.prototype.waitMove = function(e) {
       if (Math.abs(this.fixbutton.offset().left - this.fixbutton_targetx) > 10 && (+(new Date)) - this.dragStarted > 100) {
         this.moved();
-        return this.fixbutton.parents().off("mousemove", this.waitMove);
+        return this.fixbutton.parents().off("mousemove touchmove", this.waitMove);
       }
     };
 
@@ -342,35 +361,44 @@ window.initScrollable = function () {
     };
 
     Sidebar.prototype.updateHtmlTag = function() {
-      return wrapper.ws.cmd("sidebarGetHtmlTag", {}, (function(_this) {
-        return function(res) {
-          if (_this.tag.find(".content").children().length === 0) {
-            _this.log("Creating content");
-            morphdom(_this.tag.find(".content")[0], '<div class="content">' + res + '</div>');
-            return _this.when_loaded.resolve();
-          } else {
-            _this.log("Patching content");
-            return morphdom(_this.tag.find(".content")[0], '<div class="content">' + res + '</div>', {
-              onBeforeMorphEl: function(from_el, to_el) {
-                if (from_el.className === "globe" || from_el.className.indexOf("noupdate") >= 0) {
-                  return false;
-                } else {
-                  return true;
-                }
-              }
-            });
+      if (this.preload_html) {
+        this.setHtmlTag(this.preload_html);
+        return this.preload_html = null;
+      } else {
+        return wrapper.ws.cmd("sidebarGetHtmlTag", {}, this.setHtmlTag);
+      }
+    };
+
+    Sidebar.prototype.setHtmlTag = function(res) {
+      if (this.tag.find(".content").children().length === 0) {
+        this.log("Creating content");
+        this.container.addClass("loaded");
+        morphdom(this.tag.find(".content")[0], '<div class="content">' + res + '</div>');
+        return this.when_loaded.resolve();
+      } else {
+        this.log("Patching content");
+        return morphdom(this.tag.find(".content")[0], '<div class="content">' + res + '</div>', {
+          onBeforeMorphEl: function(from_el, to_el) {
+            if (from_el.className === "globe" || from_el.className.indexOf("noupdate") >= 0) {
+              return false;
+            } else {
+              return true;
+            }
           }
-        };
-      })(this));
+        });
+      }
     };
 
     Sidebar.prototype.animDrag = function(e) {
       var mousex, overdrag, overdrag_percent, targetx;
       mousex = e.pageX;
+      if (!mousex) {
+        mousex = e.originalEvent.touches[0].pageX;
+      }
       overdrag = this.fixbutton_initx - this.width - mousex;
       if (overdrag > 0) {
         overdrag_percent = 1 + overdrag / 300;
-        mousex = (e.pageX + (this.fixbutton_initx - this.width) * overdrag_percent) / (1 + overdrag_percent);
+        mousex = (mousex + (this.fixbutton_initx - this.width) * overdrag_percent) / (1 + overdrag_percent);
       }
       targetx = this.fixbutton_initx - mousex - this.fixbutton_addx;
       this.fixbutton[0].style.left = (mousex + this.fixbutton_addx) + "px";
@@ -386,8 +414,8 @@ window.initScrollable = function () {
 
     Sidebar.prototype.stopDrag = function() {
       var targetx;
-      this.fixbutton.parents().off("mousemove");
-      this.fixbutton.off("mousemove");
+      this.fixbutton.parents().off("mousemove touchmove");
+      this.fixbutton.off("mousemove touchmove");
       this.fixbutton.css("pointer-events", "");
       $(".drag-bg").remove();
       if (!this.fixbutton.hasClass("dragging")) {
@@ -421,18 +449,20 @@ window.initScrollable = function () {
           }
           this.opened = true;
         }
-        this.tag.css("transition", "0.4s ease-out");
-        this.tag.css("transform", "translateX(-" + targetx + "px)").one(transitionEnd, (function(_this) {
-          return function() {
-            _this.tag.css("transition", "");
-            if (!_this.opened) {
-              _this.container.remove();
-              _this.container = null;
-              _this.tag.remove();
-              return _this.tag = null;
-            }
-          };
-        })(this));
+        if (this.tag) {
+          this.tag.css("transition", "0.4s ease-out");
+          this.tag.css("transform", "translateX(-" + targetx + "px)").one(transitionEnd, (function(_this) {
+            return function() {
+              _this.tag.css("transition", "");
+              if (!_this.opened) {
+                _this.container.remove();
+                _this.container = null;
+                _this.tag.remove();
+                return _this.tag = null;
+              }
+            };
+          })(this));
+        }
         this.log("stopdrag", "opened:", this.opened);
         if (!this.opened) {
           return this.onClosed();
@@ -443,32 +473,44 @@ window.initScrollable = function () {
     Sidebar.prototype.onOpened = function() {
       this.log("Opened");
       this.scrollable();
-      this.tag.find("#checkbox-owned").off("click").on("click", (function(_this) {
+      this.tag.find("#checkbox-owned").off("click touchend").on("click touchend", (function(_this) {
         return function() {
           return setTimeout((function() {
             return _this.scrollable();
           }), 300);
         };
       })(this));
-      this.tag.find("#button-sitelimit").off("click").on("click", (function(_this) {
+      this.tag.find("#button-sitelimit").off("click touchend").on("click touchend", (function(_this) {
         return function() {
-          wrapper.ws.cmd("siteSetLimit", $("#input-sitelimit").val(), function() {
-            wrapper.notifications.add("done-sitelimit", "done", "Site storage limit modified!", 5000);
+          wrapper.ws.cmd("siteSetLimit", $("#input-sitelimit").val(), function(res) {
+            if (res === "ok") {
+              wrapper.notifications.add("done-sitelimit", "done", "Site storage limit modified!", 5000);
+            }
             return _this.updateHtmlTag();
           });
           return false;
         };
       })(this));
-      this.tag.find("#button-dbreload").off("click").on("click", (function(_this) {
+      this.tag.find("#button-dbreload").off("click touchend").on("click touchend", (function(_this) {
         return function() {
           wrapper.ws.cmd("dbReload", [], function() {
-            wrapper.notifications.add("done-sitelimit", "done", "Database schema reloaded", 5000);
+            wrapper.notifications.add("done-dbreload", "done", "Database schema reloaded!", 5000);
             return _this.updateHtmlTag();
           });
           return false;
         };
       })(this));
-      this.tag.find("#button-update").off("click").on("click", (function(_this) {
+      this.tag.find("#button-dbrebuild").off("click touchend").on("click touchend", (function(_this) {
+        return function() {
+          wrapper.notifications.add("done-dbrebuild", "info", "Database rebuilding....");
+          wrapper.ws.cmd("dbRebuild", [], function() {
+            wrapper.notifications.add("done-dbrebuild", "done", "Database rebuilt!", 5000);
+            return _this.updateHtmlTag();
+          });
+          return false;
+        };
+      })(this));
+      this.tag.find("#button-update").off("click touchend").on("click touchend", (function(_this) {
         return function() {
           _this.tag.find("#button-update").addClass("loading");
           wrapper.ws.cmd("siteUpdate", wrapper.site_info.address, function() {
@@ -478,53 +520,63 @@ window.initScrollable = function () {
           return false;
         };
       })(this));
-      this.tag.find("#button-pause").off("click").on("click", (function(_this) {
+      this.tag.find("#button-pause").off("click touchend").on("click touchend", (function(_this) {
         return function() {
           _this.tag.find("#button-pause").addClass("hidden");
           wrapper.ws.cmd("sitePause", wrapper.site_info.address);
           return false;
         };
       })(this));
-      this.tag.find("#button-resume").off("click").on("click", (function(_this) {
+      this.tag.find("#button-resume").off("click touchend").on("click touchend", (function(_this) {
         return function() {
           _this.tag.find("#button-resume").addClass("hidden");
           wrapper.ws.cmd("siteResume", wrapper.site_info.address);
           return false;
         };
       })(this));
-      this.tag.find("#button-delete").off("click").on("click", (function(_this) {
+      this.tag.find("#button-delete").off("click touchend").on("click touchend", (function(_this) {
         return function() {
-          wrapper.displayConfirm("Are you sure?", "Delete this site", function() {
-            _this.tag.find("#button-delete").addClass("loading");
-            return wrapper.ws.cmd("siteDelete", wrapper.site_info.address, function() {
-              return document.location = $(".fixbutton-bg").attr("href");
-            });
+          wrapper.displayConfirm("Are you sure?", ["Delete this site", "Blacklist"], function(confirmed) {
+            if (confirmed === 1) {
+              _this.tag.find("#button-delete").addClass("loading");
+              return wrapper.ws.cmd("siteDelete", wrapper.site_info.address, function() {
+                return document.location = $(".fixbutton-bg").attr("href");
+              });
+            } else if (confirmed === 2) {
+              return wrapper.displayPrompt("Blacklist this site", "text", "Delete and Blacklist", "Reason", function(reason) {
+                _this.tag.find("#button-delete").addClass("loading");
+                wrapper.ws.cmd("blacklistAdd", [wrapper.site_info.address, reason]);
+                return wrapper.ws.cmd("siteDelete", wrapper.site_info.address, function() {
+                  return document.location = $(".fixbutton-bg").attr("href");
+                });
+              });
+            }
           });
           return false;
         };
       })(this));
-      this.tag.find("#checkbox-owned").off("click").on("click", (function(_this) {
+      this.tag.find("#checkbox-owned").off("click touchend").on("click touchend", (function(_this) {
         return function() {
           return wrapper.ws.cmd("siteSetOwned", [_this.tag.find("#checkbox-owned").is(":checked")]);
         };
       })(this));
-      this.tag.find("#checkbox-autodownloadoptional").off("click").on("click", (function(_this) {
+      this.tag.find("#checkbox-autodownloadoptional").off("click touchend").on("click touchend", (function(_this) {
         return function() {
           return wrapper.ws.cmd("siteSetAutodownloadoptional", [_this.tag.find("#checkbox-autodownloadoptional").is(":checked")]);
         };
       })(this));
-      this.tag.find("#button-identity").off("click").on("click", (function(_this) {
+      this.tag.find("#button-identity").off("click touchend").on("click touchend", (function(_this) {
         return function() {
           wrapper.ws.cmd("certSelect");
           return false;
         };
       })(this));
-      this.tag.find("#checkbox-owned").off("click").on("click", (function(_this) {
+      this.tag.find("#checkbox-owned").off("click touchend").on("click touchend", (function(_this) {
         return function() {
           return wrapper.ws.cmd("siteSetOwned", [_this.tag.find("#checkbox-owned").is(":checked")]);
         };
       })(this));
-      this.tag.find("#button-settings").off("click").on("click", (function(_this) {
+      this.tag.find("#button-settings").off("click touchend").on("click touchend", (function(_this) {
         return function() {
           wrapper.ws.cmd("fileGet", "content.json", function(res) {
             var data, json_raw;
@@ -532,7 +584,7 @@ window.initScrollable = function () {
             data["title"] = $("#settings-title").val();
             data["description"] = $("#settings-description").val();
             json_raw = unescape(encodeURIComponent(JSON.stringify(data, void 0, '\t')));
-            return wrapper.ws.cmd("fileWrite", ["content.json", btoa(json_raw)], function(res) {
+            return wrapper.ws.cmd("fileWrite", ["content.json", btoa(json_raw), true], function(res) {
               if (res !== "ok") {
                 return wrapper.notifications.add("file-write", "error", "File write error: " + res);
               } else {
@@ -544,17 +596,25 @@ window.initScrollable = function () {
           return false;
         };
       })(this));
-      this.tag.find("#button-sign").off("click").on("click", (function(_this) {
+      this.tag.find("#button-sign").off("click touchend").on("click touchend", (function(_this) {
         return function() {
           var inner_path;
           inner_path = _this.tag.find("#input-contents").val();
           if (wrapper.site_info.privatekey) {
-            wrapper.ws.cmd("siteSign", ["stored", inner_path], function(res) {
+            wrapper.ws.cmd("siteSign", {
+              privatekey: "stored",
+              inner_path: inner_path,
+              update_changed_files: true
+            }, function(res) {
               return wrapper.notifications.add("sign", "done", inner_path + " Signed!", 5000);
             });
           } else {
-            wrapper.displayPrompt("Enter your private key:", "password", "Sign", function(privatekey) {
-              return wrapper.ws.cmd("siteSign", [privatekey, inner_path], function(res) {
+            wrapper.displayPrompt("Enter your private key:", "password", "Sign", "", function(privatekey) {
+              return wrapper.ws.cmd("siteSign", {
+                privatekey: privatekey,
+                inner_path: inner_path,
+                update_changed_files: true
+              }, function(res) {
                 if (res === "ok") {
                   return wrapper.notifications.add("sign", "done", inner_path + " Signed!", 5000);
                 }
@@ -564,7 +624,7 @@ window.initScrollable = function () {
           return false;
         };
       })(this));
-      this.tag.find("#button-publish").off("click").on("click", (function(_this) {
+      this.tag.find("#button-publish").off("click touchend").on("click touchend", (function(_this) {
         return function() {
           var inner_path;
           inner_path = _this.tag.find("#input-contents").val();
@@ -616,7 +676,7 @@ window.initScrollable = function () {
       return img.onload = (function(_this) {
         return function() {
           return wrapper.ws.cmd("sidebarGetPeers", [], function(globe_data) {
-            var e;
+            var e, ref, ref1;
             if (_this.globe) {
               _this.globe.scene.remove(_this.globe.points);
               _this.globe.addData(globe_data, {
@@ -625,7 +685,7 @@ window.initScrollable = function () {
                 animated: false
               });
               _this.globe.createPoints();
-            } else {
+            } else if (typeof DAT !== "undefined") {
               try {
                 _this.globe = new DAT.Globe(_this.tag.find(".globe")[0], {
                   "imgDir": "/uimedia/globe/"
@@ -636,13 +696,15 @@ window.initScrollable = function () {
                 });
                 _this.globe.createPoints();
                 _this.globe.animate();
-              } catch (_error) {
-                e = _error;
+              } catch (error) {
+                e = error;
                 console.log("WebGL error", e);
-                _this.tag.find(".globe").addClass("error").text("WebGL not supported");
+                if ((ref = _this.tag) != null) {
+                  ref.find(".globe").addClass("error").text("WebGL not supported");
+                }
               }
             }
-            return _this.tag.find(".globe").removeClass("loading");
+            return (ref1 = _this.tag) != null ? ref1.find(".globe").removeClass("loading") : void 0;
           });
         };
       })(this);

@@ -1,6 +1,7 @@
 # Included modules
 import os
 import sys
+import stat
 import time
 import logging
 
@@ -29,8 +30,18 @@ if not config.arguments:  # Config parse failed, show the help screen and exit
 # Create necessary files and dirs
 if not os.path.isdir(config.log_dir):
     os.mkdir(config.log_dir)
+    try:
+        os.chmod(config.log_dir, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+    except Exception, err:
+        print "Can't change permission of %s: %s" % (config.log_dir, err)
+
 if not os.path.isdir(config.data_dir):
     os.mkdir(config.data_dir)
+    try:
+        os.chmod(config.data_dir, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+    except Exception, err:
+        print "Can't change permission of %s: %s" % (config.data_dir, err)
+
 if not os.path.isfile("%s/sites.json" % config.data_dir):
     open("%s/sites.json" % config.data_dir, "w").write("{}")
 if not os.path.isfile("%s/users.json" % config.data_dir):
@@ -41,9 +52,18 @@ if config.action == "main":
     from util import helper
     log_file_path = "%s/debug.log" % config.log_dir
     try:
-        helper.openLocked(log_file_path, "a")
+        lock = helper.openLocked("%s/lock.pid" % config.data_dir, "w")
+        lock.write("%s" % os.getpid())
     except IOError as err:
-        print "Can't lock %s file, your ZeroNet client is probably already running, exiting... (%s)" % (log_file_path, err)
+        print "Can't open lock file, your ZeroNet client is probably already running, exiting... (%s)" % err
+        if config.open_browser:
+            print "Opening browser: %s...", config.open_browser
+            import webbrowser
+            if config.open_browser == "default_browser":
+                browser = webbrowser.get()
+            else:
+                browser = webbrowser.get(config.open_browser)
+            browser.open("http://%s:%s/%s" % (config.ui_ip if config.ui_ip != "*" else "127.0.0.1", config.ui_port, config.homepage), new=2)
         sys.exit()
 
     if os.path.isfile("%s/debug.log" % config.log_dir):  # Simple logrotate
@@ -52,7 +72,7 @@ if config.action == "main":
         os.rename("%s/debug.log" % config.log_dir, "%s/debug-last.log" % config.log_dir)
     logging.basicConfig(
         format='[%(asctime)s] %(levelname)-8s %(name)s %(message)s',
-        level=logging.DEBUG, stream=helper.openLocked(log_file_path, "a")
+        level=logging.DEBUG, stream=open(log_file_path, "a")
     )
 else:
     log_file_path = "%s/cmd.log" % config.log_dir
@@ -87,36 +107,51 @@ config.parse()  # Parse again to add plugin configuration options
 # Log current config
 logging.debug("Config: %s" % config)
 
+# Modify stack size on special hardwares
+if config.stack_size:
+    import threading
+    threading.stack_size(config.stack_size)
+
 # Use pure-python implementation of msgpack to save CPU
 if config.msgpack_purepython:
     os.environ["MSGPACK_PUREPYTHON"] = "True"
 
-# Socks Proxy monkey patch
+# Socket monkey patch
 if config.proxy:
     from util import SocksProxy
     import urllib2
     logging.info("Patching sockets to socks proxy: %s" % config.proxy)
-    config.fileserver_ip = '127.0.0.1'  # Do not accept connections anywhere but localhost
+    if config.fileserver_ip == "*":
+        config.fileserver_ip = '127.0.0.1'  # Do not accept connections anywhere but localhost
     SocksProxy.monkeyPatch(*config.proxy.split(":"))
 elif config.tor == "always":
     from util import SocksProxy
     import urllib2
     logging.info("Patching sockets to tor socks proxy: %s" % config.tor_proxy)
-    config.fileserver_ip = '127.0.0.1'  # Do not accept connections anywhere but localhost
+    if config.fileserver_ip == "*":
+        config.fileserver_ip = '127.0.0.1'  # Do not accept connections anywhere but localhost
     SocksProxy.monkeyPatch(*config.tor_proxy.split(":"))
     config.disable_udp = True
+elif config.bind:
+    bind = config.bind
+    if ":" not in config.bind:
+        bind += ":0"
+    from util import helper
+    helper.socketBindMonkeyPatch(*bind.split(":"))
+
 # -- Actions --
 
 
 @PluginManager.acceptPlugins
 class Actions(object):
     def call(self, function_name, kwargs):
+        logging.info("Version: %s r%s, Python %s, Gevent: %s" % (config.version, config.rev, sys.version, gevent.__version__))
+
         func = getattr(self, function_name, None)
         func(**kwargs)
 
     # Default action: Start serving UiServer and FileServer
     def main(self):
-        logging.info("Version: %s r%s, Python %s, Gevent: %s" % (config.version, config.rev, sys.version, gevent.__version__))
         global ui_server, file_server
         from File import FileServer
         from Ui import UiServer
@@ -153,6 +188,9 @@ class Actions(object):
 
         logging.info("Creating directory structure...")
         from Site import Site
+        from Site import SiteManager
+        SiteManager.site_manager.load()
+
         os.mkdir("%s/%s" % (config.data_dir, address))
         open("%s/%s/index.html" % (config.data_dir, address), "w").write("Hello %s!" % address)
 
@@ -164,8 +202,10 @@ class Actions(object):
 
         logging.info("Site created!")
 
-    def siteSign(self, address, privatekey=None, inner_path="content.json", publish=False):
+    def siteSign(self, address, privatekey=None, inner_path="content.json", publish=False, remove_missing_optional=False):
         from Site import Site
+        from Site import SiteManager
+        SiteManager.site_manager.load()
         logging.info("Signing site: %s..." % address)
         site = Site(address, allow_create=False)
 
@@ -182,13 +222,16 @@ class Actions(object):
                 import getpass
                 privatekey = getpass.getpass("Private key (input hidden):")
         diffs = site.content_manager.getDiffs(inner_path)
-        succ = site.content_manager.sign(inner_path=inner_path, privatekey=privatekey, update_changed_files=True)
+        succ = site.content_manager.sign(inner_path=inner_path, privatekey=privatekey, update_changed_files=True, remove_missing_optional=remove_missing_optional)
         if succ and publish:
             self.sitePublish(address, inner_path=inner_path, diffs=diffs)
 
     def siteVerify(self, address):
         import time
         from Site import Site
+        from Site import SiteManager
+        SiteManager.site_manager.load()
+
         s = time.time()
         logging.info("Verifing site: %s..." % address)
         site = Site(address)
@@ -204,6 +247,7 @@ class Actions(object):
                 logging.info("[OK] %s (Done in %.3fs)" % (content_inner_path, time.time() - s))
             else:
                 logging.error("[ERROR] %s: invalid file!" % content_inner_path)
+                raw_input("Continue?")
                 bad_files += content_inner_path
 
         logging.info("Verifying site files...")
@@ -215,14 +259,20 @@ class Actions(object):
 
     def dbRebuild(self, address):
         from Site import Site
+        from Site import SiteManager
+        SiteManager.site_manager.load()
+
         logging.info("Rebuilding site sql cache: %s..." % address)
-        site = Site(address)
+        site = SiteManager.site_manager.get(address)
         s = time.time()
         site.storage.rebuildDb()
         logging.info("Done in %.3fs" % (time.time() - s))
 
     def dbQuery(self, address, query):
         from Site import Site
+        from Site import SiteManager
+        SiteManager.site_manager.load()
+
         import json
         site = Site(address)
         result = []
@@ -232,6 +282,9 @@ class Actions(object):
 
     def siteAnnounce(self, address):
         from Site.Site import Site
+        from Site import SiteManager
+        SiteManager.site_manager.load()
+
         logging.info("Announcing site %s to tracker..." % address)
         site = Site(address)
 
@@ -242,6 +295,8 @@ class Actions(object):
 
     def siteDownload(self, address):
         from Site import Site
+        from Site import SiteManager
+        SiteManager.site_manager.load()
 
         logging.info("Opening a simple connection server")
         global file_server
@@ -269,6 +324,8 @@ class Actions(object):
 
     def siteNeedFile(self, address, inner_path):
         from Site import Site
+        from Site import SiteManager
+        SiteManager.site_manager.load()
 
         def checker():
             while 1:
@@ -288,12 +345,14 @@ class Actions(object):
 
     def sitePublish(self, address, peer_ip=None, peer_port=15441, inner_path="content.json", diffs={}):
         global file_server
+        from Site import Site
         from Site import SiteManager
         from File import FileServer  # We need fileserver to handle incoming file requests
         from Peer import Peer
+        SiteManager.site_manager.load()
 
         logging.info("Loading site...")
-        site = SiteManager.site_manager.list()[address]
+        site = Site(address, allow_create=False)
         site.settings["serving"] = True  # Serving the site even if its disabled
 
         logging.info("Creating FileServer....")
@@ -321,7 +380,11 @@ class Actions(object):
         else:
             # Already running, notify local client on new content
             logging.info("Sending siteReload")
-            my_peer = Peer("127.0.0.1", config.fileserver_port)
+            if config.fileserver_ip == "*":
+                my_peer = Peer("127.0.0.1", config.fileserver_port)
+            else:
+                my_peer = Peer(config.fileserver_ip, config.fileserver_port)
+
             logging.info(my_peer.request("siteReload", {"site": site.address, "inner_path": inner_path}))
             logging.info("Sending sitePublish")
             logging.info(my_peer.request("sitePublish", {"site": site.address, "inner_path": inner_path, "diffs": diffs}))
